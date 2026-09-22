@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cormac's Hub</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topnav">
+    <div class="brand">Cormac's Hub</div>
+    <nav class="nav-tabs">
+      <button class="nav-tab" data-view="home">Home</button>
+      <button class="nav-tab" data-view="briefing">Briefing</button>
+      <button class="nav-tab" data-view="clients">Clients</button>
+    </nav>
+  </header>
+
+  <main class="main" id="main"></main>
+
+  <div class="modal-backdrop" id="add-client-backdrop">
+    <form class="modal" id="add-client-form">
+      <h2>New client</h2>
+      <label>Name<input type="text" name="name" required autocomplete="off" /></label>
+      <label>Contact<input type="text" name="contact" placeholder="email, phone..." autocomplete="off" /></label>
+      <label>What you're building for them<textarea name="building" rows="2"></textarea></label>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary" id="cancel-add-client">Cancel</button>
+        <button type="submit" class="btn-primary">Create</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

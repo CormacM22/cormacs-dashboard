@@ -1,0 +1,13 @@
+# Client data never belongs in this repo. This is the public mirror of the app code
+# only — the working copy with real data lives in a separate private repo.
+data/
+*.json
+!package.json
+!package-lock.json
+
+node_modules/
+.env
+.env.local
+
+Thumbs.db
+.DS_Store
