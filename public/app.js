@@ -108,6 +108,24 @@ function toLocalInputValue(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/**
+ * datetime-local inputs only carry minutes, so a naive round-trip silently rewrites
+ * seconds to :00 — meaning fixing a typo in a note could change the billed duration by
+ * up to a minute. If the user didn't actually change the minute, keep the original
+ * timestamp exactly.
+ */
+function preserveSeconds(inputValue, originalIso) {
+  const fromInput = new Date(inputValue);
+  if (Number.isNaN(fromInput.getTime())) return null;
+  if (originalIso) {
+    const original = new Date(originalIso);
+    if (!Number.isNaN(original.getTime()) && toLocalInputValue(originalIso) === inputValue) {
+      return original.toISOString(); // untouched — keep the seconds
+    }
+  }
+  return fromInput.toISOString();
+}
+
 function formatDateTime(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
@@ -186,12 +204,19 @@ navTabs.forEach((tab) => tab.addEventListener('click', () => goto(tab.dataset.vi
 let runningTimer = null;
 let hubClient = null; // the client currently shown on the hub, for live total updates
 
+let timerUnreachable = false;
+
 async function refreshTimer() {
   try {
     const { running } = await api('/api/timer');
     runningTimer = running;
+    timerUnreachable = false;
   } catch {
-    runningTimer = null; // server unreachable: show nothing rather than a stale time
+    // Keep showing the last known timer rather than hiding it. Hiding would be the
+    // more dangerous failure: the only cross-page sign that a timer is running would
+    // vanish on a transient blip, and you'd shut the laptop thinking nothing was going
+    // while the entry stayed open for days.
+    timerUnreachable = true;
   }
   renderNavTimer();
 }
@@ -203,13 +228,19 @@ function renderNavTimer() {
   }
   const ms = entryDurationMs(runningTimer.entry);
   const overlong = ms >= LONG_RUNNING_MS;
+  // More than one open entry means the one-timer rule has been broken somehow. Say so
+  // loudly — two clients quietly billing the same hours is the worst silent failure here.
+  const conflicts = (runningTimer.conflicts || 1) > 1;
+
   navTimer.hidden = false;
-  navTimer.classList.toggle('overlong', overlong);
+  navTimer.classList.toggle('overlong', overlong || conflicts);
   navTimer.innerHTML = `
     <span class="nav-timer-dot"></span>
     <span class="nav-timer-name">${escapeHtml(runningTimer.name)}</span>
     <span class="nav-timer-clock">${formatDurationLive(ms)}</span>
-    ${overlong ? '<span class="nav-timer-warn" title="Running over 8 hours — did you forget to stop it?">⚠</span>' : ''}
+    ${timerUnreachable ? '<span class="nav-timer-warn" title="Can\'t reach the server — this may be out of date">⚠ offline</span>' : ''}
+    ${conflicts ? `<span class="nav-timer-warn" title="${runningTimer.conflicts} timers are running at once. Stop each client's timer to fix.">⚠ ${runningTimer.conflicts} running</span>` : ''}
+    ${overlong && !conflicts ? '<span class="nav-timer-warn" title="Running over 8 hours — did you forget to stop it?">⚠</span>' : ''}
   `;
 }
 
@@ -322,9 +353,12 @@ function renderBriefing() {
   const timeHtml = weekRows.length
     ? weekRows
         .map(
+          // Deliberately no decimal hours per row: three 10-minute rows each read
+          // 0.17 h but correctly total 0.50 h, and a column that visibly doesn't add
+          // up invites "correcting" the right number. Hours shown on the total only.
           (r) => `<div class="money-row">
             <span>${escapeHtml(r.client.name)}</span>
-            <span class="time-badge">${formatDuration(r.ms)} <span class="time-hours">(${billableHours(r.ms)} h)</span></span>
+            <span class="time-badge">${formatDuration(r.ms)}</span>
           </div>`
         )
         .join('') +
@@ -403,9 +437,11 @@ function renderTimeEntryRow(e) {
       <button class="icon-btn time-edit" title="Edit">✎</button>
       <button class="icon-btn time-delete" title="Delete">✕</button>
     </div>
-    <form class="time-row-edit" hidden>
+    <form class="time-row-edit" hidden data-start="${escapeHtml(e.start)}" data-end="${escapeHtml(e.end || '')}">
       <label>Start<input type="datetime-local" name="start" value="${toLocalInputValue(e.start)}" required /></label>
-      <label>End<input type="datetime-local" name="end" value="${e.end ? toLocalInputValue(e.end) : ''}" /></label>
+      <!-- Required on a finished entry: clearing it would reopen it as a running timer,
+           which the server rejects anyway, but failing here is clearer. -->
+      <label>End<input type="datetime-local" name="end" value="${e.end ? toLocalInputValue(e.end) : ''}" ${open ? '' : 'required'} /></label>
       <label>Note<input type="text" name="note" value="${escapeHtml(e.note || '')}" placeholder="what you worked on" /></label>
       <div class="time-row-edit-actions">
         <button type="button" class="btn-secondary time-cancel">Cancel</button>
@@ -541,8 +577,8 @@ function wireTimeEvents(slug) {
         await api(`/api/clients/${slug}/time-entries/${id}`, {
           method: 'PUT',
           body: JSON.stringify({
-            start: new Date(form.start.value).toISOString(),
-            end: form.end.value ? new Date(form.end.value).toISOString() : null,
+            start: preserveSeconds(form.start.value, form.dataset.start),
+            end: form.end.value ? preserveSeconds(form.end.value, form.dataset.end) : null,
             note: form.note.value,
           }),
         });

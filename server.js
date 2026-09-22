@@ -117,6 +117,9 @@ app.get('/api/timer', (req, res) => {
       name: running.client.name,
       entry: running.entry,
       longRunning: time.isLongRunning(running.entry),
+      // Should always be 1. More means the one-timer rule is broken and two clients
+      // are billing the same hours — the UI surfaces this rather than hiding it.
+      conflicts: running.conflicts.length,
     },
   });
 });
