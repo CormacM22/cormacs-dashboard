@@ -600,3 +600,7 @@ textarea.note-input {
   max-width: 90vw;
 }
 .toast.show { transform: translateX(-50%) translateY(0); }
+
+/* Briefing rows: delete button appears on hover, same idiom as the hub's to-do rows. */
+.due-row .icon-btn { opacity: 0; flex-shrink: 0; }
+.due-row:hover .icon-btn { opacity: 1; }

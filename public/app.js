@@ -312,10 +312,11 @@ function renderBriefing() {
         .map(({ client, todo }) => {
           const dueDate = new Date(todo.due);
           const overdue = dueDate < today;
-          return `<div class="due-row${overdue ? ' overdue' : ''}">
+          return `<div class="due-row${overdue ? ' overdue' : ''}" data-slug="${escapeHtml(client.slug)}" data-id="${todo.id}">
             <span class="due-client-tag">${escapeHtml(client.name)}</span>
             <span class="due-text">${escapeHtml(todo.text)}</span>
             <span class="due-date">${overdue ? 'overdue · ' : ''}${formatDate(todo.due)}</span>
+            <button class="icon-btn briefing-todo-delete" title="Delete this to-do">✕</button>
           </div>`;
         })
         .join('')
@@ -324,9 +325,10 @@ function renderBriefing() {
   const noDateHtml = noDateItems.length
     ? noDateItems
         .map(
-          ({ client, todo }) => `<div class="due-row">
+          ({ client, todo }) => `<div class="due-row" data-slug="${escapeHtml(client.slug)}" data-id="${todo.id}">
             <span class="due-client-tag">${escapeHtml(client.name)}</span>
             <span class="due-text">${escapeHtml(todo.text)}</span>
+            <button class="icon-btn briefing-todo-delete" title="Delete this to-do">✕</button>
           </div>`
         )
         .join('')
@@ -385,6 +387,24 @@ function renderBriefing() {
       ${moneyHtml}
     </div>
   `;
+
+  // Delete a to-do without having to open its client first. Confirmed, because unlike
+  // ticking one off this can't be undone — the to-do is gone from the client's record.
+  main.querySelectorAll('.briefing-todo-delete').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('.due-row');
+      const { slug, id } = row.dataset;
+      const text = row.querySelector('.due-text').textContent;
+      if (!confirm(`Delete "${text}"? This can't be undone.`)) return;
+      try {
+        await api(`/api/clients/${slug}/todos/${id}`, { method: 'DELETE' });
+        await loadClients();
+        renderBriefing();
+      } catch (err) {
+        alert(err.message);
+      }
+    })
+  );
 }
 
 // ---------- Clients grid ----------
