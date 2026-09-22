@@ -21,6 +21,7 @@ const QUOTES = [
 ];
 
 let clientsCache = [];
+let appSettings = { defaultRate: 0 };
 let currentView = 'home'; // 'home', 'briefing', 'clients', or a client slug
 
 async function api(path, options) {
@@ -86,6 +87,27 @@ function formatDurationLive(ms) {
 function billableHours(ms) {
   const wholeMinutes = Math.floor(Math.max(0, ms) / 60000);
   return (Math.round((wholeMinutes / 60) * 100) / 100).toFixed(2);
+}
+
+// Mirrors billableAmount() in lib/time.js: derived from the DISPLAYED hours, so the
+// figure is always reproducible by hand as "hours × rate".
+function billableAmount(ms, rate) {
+  const r = Number(rate);
+  if (!Number.isFinite(r) || r <= 0) return 0;
+  return Math.round(Number(billableHours(ms)) * r * 100) / 100;
+}
+
+function formatMoney(amount) {
+  const safe = Number.isFinite(Number(amount)) ? Number(amount) : 0;
+  return `€${safe.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** The rate applied to a client: their own if set, else the default. 0 is deliberate. */
+function effectiveRate(client) {
+  const own = client ? client.rate : null;
+  if (own === null || own === undefined || own === '') return Number(appSettings.defaultRate) || 0;
+  const r = Number(own);
+  return Number.isFinite(r) && r >= 0 ? r : Number(appSettings.defaultRate) || 0;
 }
 
 function weekStartOf(date = new Date()) {
@@ -166,7 +188,9 @@ function formatSize(bytes) {
 }
 
 async function loadClients() {
-  clientsCache = await api('/api/clients');
+  const [list, s] = await Promise.all([api('/api/clients'), api('/api/settings')]);
+  clientsCache = list;
+  appSettings = s;
 }
 
 function updateNavActive() {
@@ -260,10 +284,18 @@ function tickLiveClocks() {
     // Keep the totals moving too. Left static, they'd read "0m total" beside a timer
     // that had been running an hour — the screen disagreeing with reality.
     const entries = (hubClient && hubClient.timeEntries) || [];
+    const liveTotal = totalDurationMs(entries);
     const totalEl = document.getElementById('time-total');
     const weekEl = document.getElementById('time-week');
-    if (totalEl) totalEl.textContent = formatDuration(totalDurationMs(entries));
+    if (totalEl) totalEl.textContent = formatDuration(liveTotal);
     if (weekEl) weekEl.textContent = formatDuration(totalDurationMs(entriesThisWeek(entries)));
+
+    // The money has to move with the clock too, or it silently understates what the
+    // session is worth while you're sitting there watching it.
+    const hoursEl = document.getElementById('earn-hours');
+    const earnEl = document.getElementById('earn-total');
+    if (hoursEl) hoursEl.textContent = billableHours(liveTotal);
+    if (earnEl) earnEl.textContent = formatMoney(billableAmount(liveTotal, effectiveRate(hubClient)));
   }
 }
 
@@ -351,6 +383,12 @@ function renderBriefing() {
     .filter((r) => r.ms > 0)
     .sort((a, b) => b.ms - a.ms);
   const weekTotal = weekRows.reduce((sum, r) => sum + r.ms, 0);
+  // Summed per client, because each may be on a different rate — a single
+  // total-hours × one-rate calculation would be wrong the moment rates differ.
+  const weekEarned =
+    Math.round(
+      weekRows.reduce((sum, r) => sum + billableAmount(r.ms, effectiveRate(r.client)), 0) * 100
+    ) / 100;
 
   const timeHtml = weekRows.length
     ? weekRows
@@ -360,11 +398,17 @@ function renderBriefing() {
           // up invites "correcting" the right number. Hours shown on the total only.
           (r) => `<div class="money-row">
             <span>${escapeHtml(r.client.name)}</span>
-            <span class="time-badge">${formatDuration(r.ms)}</span>
+            <span class="time-badge">${formatDuration(r.ms)}${
+              effectiveRate(r.client) > 0
+                ? ` <span class="time-hours">${formatMoney(billableAmount(r.ms, effectiveRate(r.client)))}</span>`
+                : ''
+            }</span>
           </div>`
         )
         .join('') +
-      `<div class="money-row week-total"><span><strong>Total</strong></span><span class="time-badge"><strong>${formatDuration(weekTotal)}</strong> <span class="time-hours">(${billableHours(weekTotal)} h)</span></span></div>`
+      `<div class="money-row week-total"><span><strong>Total</strong></span><span class="time-badge"><strong>${formatDuration(weekTotal)}</strong> <span class="time-hours">(${billableHours(weekTotal)} h)</span>${
+        weekEarned > 0 ? ` <strong>${formatMoney(weekEarned)}</strong>` : ''
+      }</span></div>`
     : '<div class="empty">No time logged this week yet.</div>';
 
   main.innerHTML = `
@@ -384,9 +428,34 @@ function renderBriefing() {
     </div>
     <div class="card">
       <h2>Where things stand — money</h2>
+      <div class="money-row default-rate-row">
+        <span>Default hourly rate</span>
+        <span class="rate-field">€<input type="number" id="default-rate" min="0" step="0.5"
+          inputmode="decimal" value="${appSettings.defaultRate || ''}" placeholder="0" />/hr</span>
+      </div>
       ${moneyHtml}
     </div>
   `;
+
+  const defaultRateInput = document.getElementById('default-rate');
+  const lastGoodDefault = defaultRateInput.value;
+  defaultRateInput.addEventListener('blur', async () => {
+    const raw = defaultRateInput.value.trim();
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ defaultRate: raw === '' ? 0 : Number(raw) }),
+      });
+      await loadClients();
+      renderBriefing();
+    } catch (err) {
+      defaultRateInput.value = lastGoodDefault; // never leave a rejected rate on screen
+      alert(err.message);
+    }
+  });
+  defaultRateInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') defaultRateInput.blur();
+  });
 
   // Delete a to-do without having to open its client first. Confirmed, because unlike
   // ticking one off this can't be undone — the to-do is gone from the client's record.
@@ -419,7 +488,11 @@ function renderClientsGrid() {
             <div class="client-card-building">${escapeHtml(c.building || '')}</div>
             <div class="client-card-footer">
               <span class="client-card-todos">${openTodos ? `${openTodos} open to-do${openTodos === 1 ? '' : 's'}` : 'No open to-dos'}</span>
-              <span class="client-card-time" title="Total time logged">${formatDuration(totalDurationMs(c.timeEntries))}</span>
+              <span class="client-card-time" title="Total time logged, and what it's worth">${formatDuration(totalDurationMs(c.timeEntries))}${
+                effectiveRate(c) > 0
+                  ? ` · ${formatMoney(billableAmount(totalDurationMs(c.timeEntries), effectiveRate(c)))}`
+                  : ''
+              }</span>
               <span class="money-badge" title="Payment status">Payment: ${escapeHtml(c.money || 'not started')}</span>
             </div>
           </button>`;
@@ -476,6 +549,8 @@ function renderTimeSection(client) {
   const total = totalDurationMs(entries);
   const week = totalDurationMs(entriesThisWeek(entries));
   const open = entries.find((e) => !e.end);
+  const rate = effectiveRate(client);
+  const usingDefault = client.rate === null || client.rate === undefined || client.rate === '';
 
   const rows = entries.length
     ? entries.map(renderTimeEntryRow).join('')
@@ -489,6 +564,23 @@ function renderTimeSection(client) {
           <span class="time-stat"><strong id="time-total">${formatDuration(total)}</strong> total <span class="time-hours">(${billableHours(total)} h)</span></span>
           <span class="time-stat"><strong id="time-week">${formatDuration(week)}</strong> this week</span>
         </div>
+      </div>
+
+      <!-- Spelled out as "hours x rate = amount" so the figure can always be checked
+           by hand against what's on screen. -->
+      <div class="earnings">
+        <span class="earnings-sum">
+          <strong id="earn-hours">${billableHours(total)}</strong> h
+          <span class="earnings-x">×</span>
+          <span class="rate-field">
+            €<input type="number" id="edit-rate" min="0" step="0.5" inputmode="decimal"
+                    value="${client.rate === null || client.rate === undefined ? '' : escapeHtml(String(client.rate))}"
+                    placeholder="${appSettings.defaultRate || 0}" />/hr
+          </span>
+          <span class="earnings-x">=</span>
+          <strong class="earnings-total" id="earn-total">${formatMoney(billableAmount(total, rate))}</strong>
+        </span>
+        <span class="earnings-note">${usingDefault ? 'using your default rate' : 'rate set for this client'}</span>
       </div>
 
       <button class="timer-btn${open ? ' running' : ''}" id="timer-toggle" data-slug="${escapeHtml(client.slug)}">
@@ -540,6 +632,28 @@ function wireTimeEvents(slug) {
       alert(err.message);
       btn.disabled = false;
     }
+  });
+
+  // Blank rate means "inherit the default", which is not the same as billing zero.
+  const rateInput = document.getElementById('edit-rate');
+  const lastGoodRate = rateInput.value;
+  rateInput.addEventListener('blur', async () => {
+    const raw = rateInput.value.trim();
+    try {
+      await api(`/api/clients/${slug}`, {
+        method: 'PUT',
+        body: JSON.stringify({ rate: raw === '' ? null : Number(raw) }),
+      });
+      reload();
+    } catch (err) {
+      // Put the old value back. Leaving the rejected one on screen would show a rate
+      // that isn't the one the amount beside it was calculated from.
+      rateInput.value = lastGoodRate;
+      alert(err.message);
+    }
+  });
+  rateInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') rateInput.blur();
   });
 
   document.getElementById('show-manual-time').addEventListener('click', () => {
@@ -631,7 +745,14 @@ async function renderClientHub(slug) {
   main.innerHTML = '<p class="subtitle">Loading…</p>';
   let client;
   try {
-    client = await api(`/api/clients/${encodeURIComponent(slug)}`);
+    // Settings are fetched alongside the client, not read from the page-load cache —
+    // the rate drives a money figure, so it must never render from a stale default.
+    const [c, s] = await Promise.all([
+      api(`/api/clients/${encodeURIComponent(slug)}`),
+      api('/api/settings'),
+    ]);
+    client = c;
+    appSettings = s;
     hubClient = client;
   } catch (err) {
     main.innerHTML = `<p class="empty">${escapeHtml(err.message)}</p>`;

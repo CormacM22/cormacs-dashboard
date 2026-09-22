@@ -604,3 +604,42 @@ textarea.note-input {
 /* Briefing rows: delete button appears on hover, same idiom as the hub's to-do rows. */
 .due-row .icon-btn { opacity: 0; flex-shrink: 0; }
 .due-row:hover .icon-btn { opacity: 1; }
+
+/* ---------- Rate and earnings ---------- */
+
+.earnings {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1.5px solid var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.earnings-sum { display: flex; align-items: baseline; gap: 7px; font-size: 0.95rem; }
+.earnings-sum strong { font-variant-numeric: tabular-nums; }
+.earnings-x { color: var(--text-dim); }
+.earnings-total { font-size: 1.15rem; font-weight: 800; }
+.earnings-note { font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+
+.rate-field { display: inline-flex; align-items: baseline; gap: 1px; font-weight: 700; }
+.rate-field input {
+  width: 62px;
+  border: none;
+  border-bottom: 1.5px solid var(--border-soft);
+  background: transparent;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  padding: 1px 2px;
+  text-align: right;
+}
+.rate-field input:focus { outline: none; border-bottom-color: var(--ink); background: var(--warn-soft); }
+.rate-field input::-webkit-outer-spin-button,
+.rate-field input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.rate-field input[type=number] { -moz-appearance: textfield; }
+
+.default-rate-row { border-bottom: 1.5px solid var(--ink); }

@@ -5,6 +5,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const clients = require('./lib/clients');
 const time = require('./lib/time');
+const settings = require('./lib/settings');
 
 fs.mkdirSync(clients.CLIENTS_DIR, { recursive: true });
 fs.mkdirSync(clients.FILES_DIR, { recursive: true });
@@ -56,13 +57,38 @@ app.get('/api/clients/:slug', loadClient, (req, res) => {
   res.json(req.client);
 });
 
+app.get('/api/settings', (req, res) => res.json(settings.getSettings()));
+
+app.put('/api/settings', (req, res) => {
+  try {
+    res.json(settings.saveSettings(req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.put('/api/clients/:slug', loadClient, (req, res) => {
-  const { name, contact, building, money } = req.body || {};
+  const { name, contact, building, money, rate } = req.body || {};
   const client = req.client;
   if (name !== undefined) client.name = name;
   if (contact !== undefined) client.contact = contact;
   if (building !== undefined) client.building = building;
   if (money !== undefined) client.money = money;
+
+  if (rate !== undefined) {
+    // Empty means "use the default rate", not "bill zero" — those are different, and
+    // confusing them would silently change what a client is charged.
+    if (rate === null || rate === '') {
+      client.rate = null;
+    } else {
+      const r = Number(rate);
+      if (!Number.isFinite(r) || r < 0) {
+        return res.status(400).json({ error: 'Hourly rate must be a number, and not negative' });
+      }
+      client.rate = r;
+    }
+  }
+
   res.json(clients.saveClient(client));
 });
 
