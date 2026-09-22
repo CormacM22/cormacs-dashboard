@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Personal dashboard for managing freelance client work.",
   "private": true,
+  "license": "MIT",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
