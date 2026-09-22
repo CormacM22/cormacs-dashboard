@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const clients = require('./lib/clients');
+const time = require('./lib/time');
 
 fs.mkdirSync(clients.CLIENTS_DIR, { recursive: true });
 fs.mkdirSync(clients.FILES_DIR, { recursive: true });
@@ -102,6 +103,69 @@ app.delete('/api/clients/:slug/notes/:id', loadClient, (req, res) => {
   const client = req.client;
   client.notes = client.notes.filter((n) => n.id !== req.params.id);
   res.json(clients.saveClient(client));
+});
+
+// ---------- Time tracking ----------
+
+/** Which timer is running right now, if any. Polled by the header timer widget. */
+app.get('/api/timer', (req, res) => {
+  const running = clients.findRunningTimer();
+  if (!running) return res.json({ running: null });
+  res.json({
+    running: {
+      slug: running.client.slug,
+      name: running.client.name,
+      entry: running.entry,
+      longRunning: time.isLongRunning(running.entry),
+    },
+  });
+});
+
+app.post('/api/clients/:slug/timer/start', loadClient, (req, res) => {
+  try {
+    const { stopped, alreadyRunning } = clients.startTimer(req.params.slug, (req.body || {}).note);
+    res.status(201).json({
+      client: clients.getClient(req.params.slug),
+      // Surfaced so the UI can say "stopped X to start this" rather than silently
+      // ending a timer the user thought was still going.
+      stopped: stopped ? { slug: stopped.slug, name: stopped.name } : null,
+      alreadyRunning,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/clients/:slug/timer/stop', loadClient, (req, res) => {
+  try {
+    res.json(clients.stopTimer(req.params.slug));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/clients/:slug/time-entries', loadClient, (req, res) => {
+  try {
+    res.status(201).json(clients.addTimeEntry(req.params.slug, req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/clients/:slug/time-entries/:id', loadClient, (req, res) => {
+  try {
+    res.json(clients.updateTimeEntry(req.params.slug, req.params.id, req.body || {}));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/clients/:slug/time-entries/:id', loadClient, (req, res) => {
+  try {
+    res.json(clients.deleteTimeEntry(req.params.slug, req.params.id));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.get('/api/clients/:slug/files', loadClient, (req, res) => {

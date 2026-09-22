@@ -1,5 +1,6 @@
 const main = document.getElementById('main');
 const navTabs = document.querySelectorAll('.nav-tab');
+const navTimer = document.getElementById('nav-timer');
 
 const QUOTES = [
   { text: 'The way to get started is to quit talking and begin doing.', author: 'Walt Disney' },
@@ -38,6 +39,82 @@ function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+// ---------- Time helpers ----------
+//
+// These mirror dashboard/lib/time.js. That module is the tested source of truth for
+// anything billed; these exist only so the browser can render a live-ticking clock
+// without a round trip. Keep them in step — if they ever disagree, the server wins.
+
+const LONG_RUNNING_MS = 8 * 60 * 60 * 1000;
+
+function entryDurationMs(entry, now = Date.now()) {
+  if (!entry || !entry.start) return 0;
+  const start = new Date(entry.start).getTime();
+  const end = entry.end ? new Date(entry.end).getTime() : now;
+  if (Number.isNaN(start) || Number.isNaN(end)) return 0;
+  return Math.max(0, end - start);
+}
+
+function totalDurationMs(entries, now = Date.now()) {
+  if (!Array.isArray(entries)) return 0;
+  return entries.reduce((sum, e) => sum + entryDurationMs(e, now), 0);
+}
+
+function formatDuration(ms) {
+  const totalMinutes = Math.floor(Math.max(0, ms) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${minutes}m`;
+  if (minutes === 0) return `${hours}h`;
+  return `${hours}h ${minutes}m`;
+}
+
+/** With seconds — only for the live ticking timer, so it visibly moves. */
+function formatDurationLive(ms) {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+// Truncate to whole minutes first so this always matches formatDuration above —
+// see the note in lib/time.js. Mirrors billableHours() there.
+function billableHours(ms) {
+  const wholeMinutes = Math.floor(Math.max(0, ms) / 60000);
+  return (Math.round((wholeMinutes / 60) * 100) / 100).toFixed(2);
+}
+
+function weekStartOf(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday-based week
+  return d;
+}
+
+function entriesThisWeek(entries) {
+  const from = weekStartOf().getTime();
+  return (entries || []).filter((e) => new Date(e.start).getTime() >= from);
+}
+
+/** For datetime-local inputs, which expect local time with no timezone suffix. */
+function toLocalInputValue(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString(undefined, {
+    weekday: 'short', day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit',
+  });
 }
 
 function formatDate(iso) {
@@ -99,6 +176,70 @@ async function goto(view) {
 }
 
 navTabs.forEach((tab) => tab.addEventListener('click', () => goto(tab.dataset.view)));
+
+// ---------- Nav timer ----------
+//
+// Visible on every page. The running timer is stored server-side, so it survives a
+// page reload, a closed browser, or the server restarting — the clock below is only a
+// display of `runningTimer.entry.start`, never the source of the elapsed time.
+
+let runningTimer = null;
+let hubClient = null; // the client currently shown on the hub, for live total updates
+
+async function refreshTimer() {
+  try {
+    const { running } = await api('/api/timer');
+    runningTimer = running;
+  } catch {
+    runningTimer = null; // server unreachable: show nothing rather than a stale time
+  }
+  renderNavTimer();
+}
+
+function renderNavTimer() {
+  if (!runningTimer) {
+    navTimer.hidden = true;
+    return;
+  }
+  const ms = entryDurationMs(runningTimer.entry);
+  const overlong = ms >= LONG_RUNNING_MS;
+  navTimer.hidden = false;
+  navTimer.classList.toggle('overlong', overlong);
+  navTimer.innerHTML = `
+    <span class="nav-timer-dot"></span>
+    <span class="nav-timer-name">${escapeHtml(runningTimer.name)}</span>
+    <span class="nav-timer-clock">${formatDurationLive(ms)}</span>
+    ${overlong ? '<span class="nav-timer-warn" title="Running over 8 hours — did you forget to stop it?">⚠</span>' : ''}
+  `;
+}
+
+navTimer.addEventListener('click', () => {
+  if (runningTimer) goto(runningTimer.slug);
+});
+
+/** One-second tick for every live clock on screen. */
+function tickLiveClocks() {
+  renderNavTimer();
+
+  // The hub's own clock, when you're looking at the client being timed.
+  const hubClock = document.getElementById('hub-timer-clock');
+  if (hubClock && runningTimer && runningTimer.slug === currentView) {
+    hubClock.textContent = formatDurationLive(entryDurationMs(runningTimer.entry));
+
+    // Keep the totals moving too. Left static, they'd read "0m total" beside a timer
+    // that had been running an hour — the screen disagreeing with reality.
+    const entries = (hubClient && hubClient.timeEntries) || [];
+    const totalEl = document.getElementById('time-total');
+    const weekEl = document.getElementById('time-week');
+    if (totalEl) totalEl.textContent = formatDuration(totalDurationMs(entries));
+    if (weekEl) weekEl.textContent = formatDuration(totalDurationMs(entriesThisWeek(entries)));
+  }
+}
+
+// Tick the display every second; re-check the server every 30s in case the timer was
+// changed from another tab.
+setInterval(tickLiveClocks, 1000);
+setInterval(refreshTimer, 30000);
 
 // ---------- Home ----------
 
@@ -171,6 +312,25 @@ function renderBriefing() {
         .join('')
     : '<div class="empty">Add a client to see them here.</div>';
 
+  // Time this week, biggest first — answers "which client is eating my week".
+  const weekRows = clientsCache
+    .map((c) => ({ client: c, ms: totalDurationMs(entriesThisWeek(c.timeEntries)) }))
+    .filter((r) => r.ms > 0)
+    .sort((a, b) => b.ms - a.ms);
+  const weekTotal = weekRows.reduce((sum, r) => sum + r.ms, 0);
+
+  const timeHtml = weekRows.length
+    ? weekRows
+        .map(
+          (r) => `<div class="money-row">
+            <span>${escapeHtml(r.client.name)}</span>
+            <span class="time-badge">${formatDuration(r.ms)} <span class="time-hours">(${billableHours(r.ms)} h)</span></span>
+          </div>`
+        )
+        .join('') +
+      `<div class="money-row week-total"><span><strong>Total</strong></span><span class="time-badge"><strong>${formatDuration(weekTotal)}</strong> <span class="time-hours">(${billableHours(weekTotal)} h)</span></span></div>`
+    : '<div class="empty">No time logged this week yet.</div>';
+
   main.innerHTML = `
     <h1>Today's briefing</h1>
     <p class="subtitle">${today.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
@@ -181,6 +341,10 @@ function renderBriefing() {
     <div class="card">
       <h2>Open, no date set</h2>
       ${noDateHtml}
+    </div>
+    <div class="card">
+      <h2>Time this week</h2>
+      ${timeHtml}
     </div>
     <div class="card">
       <h2>Where things stand — money</h2>
@@ -201,6 +365,7 @@ function renderClientsGrid() {
             <div class="client-card-building">${escapeHtml(c.building || '')}</div>
             <div class="client-card-footer">
               <span class="client-card-todos">${openTodos ? `${openTodos} open to-do${openTodos === 1 ? '' : 's'}` : 'No open to-dos'}</span>
+              <span class="client-card-time" title="Total time logged">${formatDuration(totalDurationMs(c.timeEntries))}</span>
               <span class="money-badge" title="Payment status">Payment: ${escapeHtml(c.money || 'not started')}</span>
             </div>
           </button>`;
@@ -225,6 +390,185 @@ function renderClientsGrid() {
   document.getElementById('add-client-btn').addEventListener('click', () => backdrop.classList.add('open'));
 }
 
+// ---------- Time section (client hub) ----------
+
+function renderTimeEntryRow(e) {
+  const open = !e.end;
+  const duration = formatDuration(entryDurationMs(e));
+  return `<div class="time-row${open ? ' running' : ''}" data-id="${e.id}">
+    <div class="time-row-view">
+      <span class="time-row-when">${escapeHtml(formatDateTime(e.start))}${e.end ? ` – ${escapeHtml(new Date(e.end).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))}` : ''}</span>
+      <span class="time-row-note">${escapeHtml(e.note || '')}</span>
+      <span class="time-row-dur">${open ? 'running' : duration}</span>
+      <button class="icon-btn time-edit" title="Edit">✎</button>
+      <button class="icon-btn time-delete" title="Delete">✕</button>
+    </div>
+    <form class="time-row-edit" hidden>
+      <label>Start<input type="datetime-local" name="start" value="${toLocalInputValue(e.start)}" required /></label>
+      <label>End<input type="datetime-local" name="end" value="${e.end ? toLocalInputValue(e.end) : ''}" /></label>
+      <label>Note<input type="text" name="note" value="${escapeHtml(e.note || '')}" placeholder="what you worked on" /></label>
+      <div class="time-row-edit-actions">
+        <button type="button" class="btn-secondary time-cancel">Cancel</button>
+        <button type="submit" class="btn-primary">Save</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+function renderTimeSection(client) {
+  const entries = [...(client.timeEntries || [])].sort((a, b) => b.start.localeCompare(a.start));
+  const total = totalDurationMs(entries);
+  const week = totalDurationMs(entriesThisWeek(entries));
+  const open = entries.find((e) => !e.end);
+
+  const rows = entries.length
+    ? entries.map(renderTimeEntryRow).join('')
+    : '<div class="empty">No time logged yet.</div>';
+
+  return `
+    <section class="section" id="time-section">
+      <div class="time-head">
+        <h2>Time</h2>
+        <div class="time-stats">
+          <span class="time-stat"><strong id="time-total">${formatDuration(total)}</strong> total <span class="time-hours">(${billableHours(total)} h)</span></span>
+          <span class="time-stat"><strong id="time-week">${formatDuration(week)}</strong> this week</span>
+        </div>
+      </div>
+
+      <button class="timer-btn${open ? ' running' : ''}" id="timer-toggle" data-slug="${escapeHtml(client.slug)}">
+        ${open
+          ? `<span class="timer-btn-label">Stop timer</span><span class="timer-btn-clock" id="hub-timer-clock">${formatDurationLive(entryDurationMs(open))}</span>`
+          : '<span class="timer-btn-label">Start timer</span>'}
+      </button>
+      ${open && entryDurationMs(open) >= LONG_RUNNING_MS
+        ? '<div class="time-warning">⚠ This timer has been running over 8 hours. If you left it on, stop it and correct the entry below.</div>'
+        : ''}
+
+      <div id="time-entries">${rows}</div>
+
+      <button class="btn-link" id="show-manual-time">+ Add time manually</button>
+      <form class="manual-time" id="manual-time-form" hidden>
+        <label>Start<input type="datetime-local" name="start" required /></label>
+        <label>End<input type="datetime-local" name="end" required /></label>
+        <label>Note<input type="text" name="note" placeholder="what you worked on" /></label>
+        <button type="submit" class="btn-primary">Add</button>
+      </form>
+    </section>`;
+}
+
+function wireTimeEvents(slug) {
+  const section = document.getElementById('time-section');
+  if (!section) return;
+
+  const reload = () => renderClientHub(slug);
+
+  document.getElementById('timer-toggle').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; // a double-click must not open two timers
+    try {
+      if (btn.classList.contains('running')) {
+        await api(`/api/clients/${slug}/timer/stop`, { method: 'POST' });
+      } else {
+        const res = await api(`/api/clients/${slug}/timer/start`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        // Never stop another client's timer silently — that would look like lost time.
+        if (res.stopped) {
+          showToast(`Stopped the timer on ${res.stopped.name} first — only one runs at a time.`);
+        }
+      }
+      await refreshTimer();
+      reload();
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('show-manual-time').addEventListener('click', () => {
+    const form = document.getElementById('manual-time-form');
+    form.hidden = !form.hidden;
+    if (!form.hidden) form.start.focus();
+  });
+
+  document.getElementById('manual-time-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api(`/api/clients/${slug}/time-entries`, {
+        method: 'POST',
+        body: JSON.stringify({
+          start: new Date(f.start.value).toISOString(),
+          end: new Date(f.end.value).toISOString(),
+          note: f.note.value,
+        }),
+      });
+      reload();
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  section.querySelectorAll('.time-row').forEach((row) => {
+    const id = row.dataset.id;
+    const view = row.querySelector('.time-row-view');
+    const form = row.querySelector('.time-row-edit');
+
+    row.querySelector('.time-edit').addEventListener('click', () => {
+      view.hidden = true;
+      form.hidden = false;
+    });
+    row.querySelector('.time-cancel').addEventListener('click', () => {
+      form.hidden = true;
+      view.hidden = false;
+    });
+
+    row.querySelector('.time-delete').addEventListener('click', async () => {
+      if (!confirm('Delete this time entry? This cannot be undone.')) return;
+      try {
+        await api(`/api/clients/${slug}/time-entries/${id}`, { method: 'DELETE' });
+        await refreshTimer();
+        reload();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await api(`/api/clients/${slug}/time-entries/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            start: new Date(form.start.value).toISOString(),
+            end: form.end.value ? new Date(form.end.value).toISOString() : null,
+            note: form.note.value,
+          }),
+        });
+        await refreshTimer();
+        reload();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+  });
+}
+
+function showToast(message) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    el.className = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = message;
+  el.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => el.classList.remove('show'), 4000);
+}
+
 // ---------- Client hub ----------
 
 async function renderClientHub(slug) {
@@ -232,6 +576,7 @@ async function renderClientHub(slug) {
   let client;
   try {
     client = await api(`/api/clients/${encodeURIComponent(slug)}`);
+    hubClient = client;
   } catch (err) {
     main.innerHTML = `<p class="empty">${escapeHtml(err.message)}</p>`;
     return;
@@ -282,6 +627,8 @@ async function renderClientHub(slug) {
 
     <div class="hub-columns">
       <div class="hub-main">
+        ${renderTimeSection(client)}
+
         <section class="section">
           <h2>To-dos</h2>
           <div id="todo-list">${todosHtml}</div>
@@ -314,6 +661,7 @@ async function renderClientHub(slug) {
 
   document.getElementById('back-to-clients').addEventListener('click', () => goto('clients'));
   wireHubEvents(client.slug);
+  wireTimeEvents(client.slug);
   loadFiles(client.slug);
 }
 
@@ -466,3 +814,4 @@ document.getElementById('add-client-form').addEventListener('submit', async (e) 
 // ---------- Init ----------
 
 goto('home');
+refreshTimer();
