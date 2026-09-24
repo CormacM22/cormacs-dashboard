@@ -94,7 +94,9 @@ function billableHours(ms) {
 function billableAmount(ms, rate) {
   const r = Number(rate);
   if (!Number.isFinite(r) || r <= 0) return 0;
-  return Math.round(Number(billableHours(ms)) * r * 100) / 100;
+  // toFixed before rounding — see the note in lib/time.js. lib/mirror.test.js pins
+  // these two copies together.
+  return Math.round((Number(billableHours(ms)) * r * 100).toFixed(6)) / 100;
 }
 
 function formatMoney(amount) {
@@ -104,10 +106,13 @@ function formatMoney(amount) {
 
 /** The rate applied to a client: their own if set, else the default. 0 is deliberate. */
 function effectiveRate(client) {
+  const fallback = Math.max(0, Number(appSettings && appSettings.defaultRate)) || 0;
   const own = client ? client.rate : null;
-  if (own === null || own === undefined || own === '') return Number(appSettings.defaultRate) || 0;
-  const r = Number(own);
-  return Number.isFinite(r) && r >= 0 ? r : Number(appSettings.defaultRate) || 0;
+  if (own === null || own === undefined || (typeof own === 'string' && own.trim() === '')) {
+    return fallback;
+  }
+  const r = typeof own === 'number' || typeof own === 'string' ? Number(own) : NaN;
+  return Number.isFinite(r) && r >= 0 ? r : fallback;
 }
 
 function weekStartOf(date = new Date()) {
@@ -290,12 +295,15 @@ function tickLiveClocks() {
     if (totalEl) totalEl.textContent = formatDuration(liveTotal);
     if (weekEl) weekEl.textContent = formatDuration(totalDurationMs(entriesThisWeek(entries)));
 
+    // This decimal-hours figure sat frozen while the timer ran, so the screen could
+    // read "2h total (0.00 h)" beside an earnings line saying 2.00 h — two different
+    // answers to the same question, one of which gets copied onto an invoice.
+    const totalHoursEl = document.getElementById('time-total-hours');
+    if (totalHoursEl) totalHoursEl.textContent = billableHours(liveTotal);
+
     // The money has to move with the clock too, or it silently understates what the
     // session is worth while you're sitting there watching it.
-    const hoursEl = document.getElementById('earn-hours');
-    const earnEl = document.getElementById('earn-total');
-    if (hoursEl) hoursEl.textContent = billableHours(liveTotal);
-    if (earnEl) earnEl.textContent = formatMoney(billableAmount(liveTotal, effectiveRate(hubClient)));
+    refreshEarnings(liveTotal);
   }
 }
 
@@ -406,7 +414,12 @@ function renderBriefing() {
           </div>`
         )
         .join('') +
-      `<div class="money-row week-total"><span><strong>Total</strong></span><span class="time-badge"><strong>${formatDuration(weekTotal)}</strong> <span class="time-hours">(${billableHours(weekTotal)} h)</span>${
+      // No decimal hours on this row. Clients can be on different rates, so there is
+      // no single "hours x rate" that reconciles with the money beside it — printing
+      // one invited exactly the mismatch a review caught here (0.50 h shown next to
+      // €30.60, which is not 0.50 x any one rate). The money column is the sum of the
+      // rows above it and adds up exactly.
+      `<div class="money-row week-total"><span><strong>Total</strong></span><span class="time-badge"><strong>${formatDuration(weekTotal)}</strong>${
         weekEarned > 0 ? ` <strong>${formatMoney(weekEarned)}</strong>` : ''
       }</span></div>`
     : '<div class="empty">No time logged this week yet.</div>';
@@ -519,6 +532,34 @@ function renderClientsGrid() {
 
 // ---------- Time section (client hub) ----------
 
+/**
+ * The rate currently SHOWN in the rate box, which may not yet be saved.
+ *
+ * The earnings line must be computed from this rather than from the stored rate:
+ * otherwise typing 90 over 60 leaves "1.50 h × €90/hr = €90.00" on screen — an amount
+ * that is not the product of the two numbers printed either side of it.
+ */
+function displayedHubRate() {
+  const el = document.getElementById('edit-rate');
+  if (!el) return effectiveRate(hubClient);
+
+  const raw = el.value.trim();
+  if (raw === '') return Math.max(0, Number(appSettings.defaultRate)) || 0;
+  const r = Number(raw);
+  return Number.isFinite(r) && r >= 0 ? r : 0;
+}
+
+/** Repaints the hours × rate = amount line so all three agree. */
+function refreshEarnings(ms) {
+  const hoursEl = document.getElementById('earn-hours');
+  const earnEl = document.getElementById('earn-total');
+  if (!hoursEl || !earnEl) return;
+
+  const total = ms === undefined ? totalDurationMs((hubClient && hubClient.timeEntries) || []) : ms;
+  hoursEl.textContent = billableHours(total);
+  earnEl.textContent = formatMoney(billableAmount(total, displayedHubRate()));
+}
+
 function renderTimeEntryRow(e) {
   const open = !e.end;
   const duration = formatDuration(entryDurationMs(e));
@@ -561,7 +602,7 @@ function renderTimeSection(client) {
       <div class="time-head">
         <h2>Time</h2>
         <div class="time-stats">
-          <span class="time-stat"><strong id="time-total">${formatDuration(total)}</strong> total <span class="time-hours">(${billableHours(total)} h)</span></span>
+          <span class="time-stat"><strong id="time-total">${formatDuration(total)}</strong> total <span class="time-hours">(<span id="time-total-hours">${billableHours(total)}</span> h)</span></span>
           <span class="time-stat"><strong id="time-week">${formatDuration(week)}</strong> this week</span>
         </div>
       </div>
@@ -579,6 +620,8 @@ function renderTimeSection(client) {
           </span>
           <span class="earnings-x">=</span>
           <strong class="earnings-total" id="earn-total">${formatMoney(billableAmount(total, rate))}</strong>
+          <!-- earn-hours / earn-total are repainted by refreshEarnings() so they always
+               match the rate box beside them, saved or not. -->
         </span>
         <span class="earnings-note">${usingDefault ? 'using your default rate' : 'rate set for this client'}</span>
       </div>
@@ -637,6 +680,9 @@ function wireTimeEvents(slug) {
   // Blank rate means "inherit the default", which is not the same as billing zero.
   const rateInput = document.getElementById('edit-rate');
   const lastGoodRate = rateInput.value;
+  // Recompute as you type, so the amount is always the product of the two numbers
+  // currently on screen — even before the new rate has been saved.
+  rateInput.addEventListener('input', () => refreshEarnings());
   rateInput.addEventListener('blur', async () => {
     const raw = rateInput.value.trim();
     try {
@@ -649,6 +695,7 @@ function wireTimeEvents(slug) {
       // Put the old value back. Leaving the rejected one on screen would show a rate
       // that isn't the one the amount beside it was calculated from.
       rateInput.value = lastGoodRate;
+      refreshEarnings(); // put the amount back in step with the restored rate
       alert(err.message);
     }
   });
