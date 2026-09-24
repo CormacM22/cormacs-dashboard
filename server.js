@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -233,6 +234,23 @@ app.delete('/api/clients/:slug/files/:filename', loadClient, (req, res) => {
 // and files — binding to 0.0.0.0 (the default) would expose all of it to anyone on
 // the same wifi. Change this only if you deliberately want it reachable from another
 // device, and add auth first if you do.
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Dashboard running at http://localhost:${PORT}`);
-});
+//
+// BOTH loopback addresses, deliberately. Windows resolves "localhost" to the IPv6
+// ::1 before 127.0.0.1, so an IPv4-only bind means every request fails on IPv6 first:
+// browsers fall back after a delay, and anything that doesn't fall back (PowerShell's
+// Invoke-WebRequest, some clients) simply cannot reach the app at all. Listening on
+// 127.0.0.1 alone made the dashboard look dead. These are still loopback only — no
+// external interface is exposed.
+const LOOPBACKS = ['127.0.0.1', '::1'];
+
+for (const host of LOOPBACKS) {
+  const server = http.createServer(app);
+  server.on('error', (err) => {
+    // A machine with IPv6 disabled can't bind ::1. That's fine — the other listener
+    // still serves. Only complain if we end up with nothing.
+    console.error(`Could not listen on ${host}:${PORT} — ${err.code || err.message}`);
+  });
+  server.listen(PORT, host, () => {
+    console.log(`Dashboard running at http://${host.includes(':') ? `[${host}]` : host}:${PORT}`);
+  });
+}
